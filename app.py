@@ -1,65 +1,96 @@
 import streamlit as st
 import numpy as np
 import onnxruntime as ort
-from PIL import Image
+import torch
+import matplotlib.pyplot as plt
 
-# Səhifə konfiqurasiyası
-st.set_page_config(
-    page_title="First Break Picking",
-    page_icon="⚡",
-    layout="centered"
-)
+st.set_page_config(page_title="First Break Picking", layout="wide")
+st.title("⚡ First Break Picking (UNet ONNX)")
 
-st.title("⚡ First Break Picking (ONNX)")
-st.write("Seysmik şəkil faylını yükləyin və modelin ilk gəliş dalğalarını necə aşkar etdiyini görün.")
-
-# ONNX modelini yaddaşa yükləyirik (cache vasitəsilə sürətləndiririk)
 @st.cache_resource
-def load_model():
+def load_session():
     session = ort.InferenceSession("unet_model.onnx")
-    input_name = session.get_inputs()[0].name
-    output_name = session.get_outputs()[0].name
-    return session, input_name, output_name
+    input_meta = session.get_inputs()[0]
+    output_meta = session.get_outputs()[0]
+    return session, input_meta, output_meta
 
 try:
-    session, input_name, output_name = load_model()
+    session, input_meta, output_meta = load_session()
+    input_name = input_meta.name
+    output_name = output_meta.name
+    expected_shape = input_meta.shape
+    
+    st.success(f"Model uğurla yükləndi | Input: `{input_name}` | Gözlənilən Shape: `{expected_shape}`")
 except Exception as e:
-    st.error(f"Model yüklənərkən xəta baş verdi: {e}")
+    st.error(f"Model yüklənmə xətası: {e}")
     st.stop()
 
-# Giriş ölçüləri (Modelinizin gözlədiyi ölçüyə uyğun dəyişin)
-IMG_HEIGHT = 256
-IMG_WIDTH = 256
-
-# Fayl yükləmə interfeysi
-uploaded_file = st.file_uploader("Seysmik kəsim şəklini seçin...", type=["png", "jpg", "jpeg"])
+uploaded_file = st.file_uploader(".pt Faylı Yükləyin", type=["pt"])
 
 if uploaded_file is not None:
-    # Şəkli açırıq
-    image = Image.open(uploaded_file)
+    data_dict = torch.load(uploaded_file, map_location="cpu")
     
-    # 2 Sütunlu vizuallaşdırma
+    if isinstance(data_dict, dict):
+        shot = data_dict["data"][0].numpy() if data_dict["data"].ndim == 3 else data_dict["data"].numpy()
+        mask = data_dict.get("mask", None)
+        if mask is not None and mask.ndim == 3:
+            mask = mask[0].numpy()
+    else:
+        shot = data_dict[0].numpy()
+        mask = None
+
+    # Transpose məsələsini modelin gözlədiyi ölçüyə uyğunlaşdırırıq
+    # Əgər model (H, W) kimi müəyyən ölçü gözləyirsə:
+    shot_input = shot.T  # (1578, 751)
+
+    # Normallaşdırma
+    vlim = np.percentile(np.abs(shot_input), 98)
+    if vlim == 0:
+        vlim = 1.0
+    shot_norm = np.clip(shot_input / vlim, -1.0, 1.0).astype(np.float32)
+
+    # Modelin kanal sayını avtomatik aşkar etmək:
+    expected_channels = expected_shape[1] if isinstance(expected_shape[1], int) else 1
+
+    if expected_channels == 2:
+        if mask is not None:
+            mask_input = mask.T.astype(np.float32)
+        else:
+            mask_input = np.zeros_like(shot_norm, dtype=np.float32)
+        combined_tensor = np.stack([shot_norm, mask_input], axis=0)
+    else:
+        combined_tensor = np.expand_dims(shot_norm, axis=0)
+
+    # Batch dimension: (1, C, H, W)
+    input_tensor = np.expand_dims(combined_tensor, axis=0).astype(np.float32)
+
+    # Tensorun model tərəfindən qəbulunu yoxlayırıq
+    st.write(f"Göndərilən Tensor Shape: `{input_tensor.shape}`, Data Type: `{input_tensor.dtype}`")
+
     col1, col2 = st.columns(2)
-    
     with col1:
-        st.subheader("Giriş Şəkli")
-        st.image(image, use_container_width=True)
-    
-    # Ön emal (Pre-processing)
-    img_resized = image.convert("RGB").resize((IMG_WIDTH, IMG_HEIGHT))
-    img_np = np.array(img_resized, dtype=np.float32) / 255.0
-    img_np = np.transpose(img_np, (2, 0, 1))  # (H, W, C) -> (C, H, W)
-    input_tensor = np.expand_dims(img_np, axis=0)
-    
-    # Modellə təxmin
-    with st.spinner("Model təxmin edir..."):
-        outputs = session.run([output_name], {input_name: input_tensor})
-        mask = outputs[0][0]
-        if mask.ndim == 3 and mask.shape[0] == 1:
-            mask = mask.squeeze(0)
-        mask_binary = (mask > 0.5).astype(np.uint8) * 255
-        result_img = Image.fromarray(mask_binary)
-    
-    with col2:
-        st.subheader("Təxmin (Maska)")
-        st.image(result_img, use_container_width=True)
+        fig, ax = plt.subplots(figsize=(5, 5))
+        ax.imshow(shot_norm, cmap="seismic", aspect="auto")
+        ax.set_title("Input Seismogram")
+        ax.axis("off")
+        st.pyplot(fig)
+        plt.close(fig)
+
+    if st.button("İnferensiyanı Başlat"):
+        try:
+            outputs = session.run([output_name], {input_name: input_tensor})
+            pred = outputs[0][0]
+            if pred.ndim == 3:
+                pred = pred.squeeze(0)
+
+            with col2:
+                fig_pred, ax_pred = plt.subplots(figsize=(5, 5))
+                ax_pred.imshow(pred, cmap="tab10", aspect="auto")
+                ax_pred.set_title("Prediction Mask")
+                ax_pred.axis("off")
+                st.pyplot(fig_pred)
+                plt.close(fig_pred)
+
+        except Exception as err:
+            st.error(f"ONNX Inference Error: {err}")
+            st.warning("Əgər xəta verirsə, `shot_input = shot.T` sətirini `shot_input = shot` ilə əvəz edin.")
