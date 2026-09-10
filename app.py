@@ -30,6 +30,7 @@ uploaded_file = st.file_uploader(".pt Faylı Yükləyin", type=["pt"])
 if uploaded_file is not None:
     data_dict = torch.load(uploaded_file, map_location="cpu")
     
+    # 1. Məlumatın çıxarılması
     if isinstance(data_dict, dict):
         shot = data_dict["data"][0].numpy() if data_dict["data"].ndim == 3 else data_dict["data"].numpy()
         mask = data_dict.get("mask", None)
@@ -39,7 +40,7 @@ if uploaded_file is not None:
         shot = data_dict[0].numpy()
         mask = None
 
-    # Model (1578, 751) gözləyir. Əgər gələn matris (751, 1578)-dirsə, .T edərək (1578, 751) edirik
+    # 2. Ölçülərin (1578, 751) formasına gətirilməsi
     if shot.shape == (751, 1578):
         shot_input = shot.T
         mask_input = mask.T if mask is not None else None
@@ -47,13 +48,13 @@ if uploaded_file is not None:
         shot_input = shot
         mask_input = mask
 
-    # Percentile 98 normallaşdırılması
+    # 3. Normallaşdırma (98th percentile)
     vlim = np.percentile(np.abs(shot_input), 98)
     if vlim == 0:
         vlim = 1.0
     shot_norm = np.clip(shot_input / vlim, -1.0, 1.0).astype(np.float32)
 
-    # Modelin kanal sayını avtomatik aşkar etmək (1 və ya 2 kanal)
+    # 4. Kanal sayına uyğun tensor formalaşdırılması (1 və ya 2 kanal)
     expected_channels = expected_shape[1] if len(expected_shape) > 1 and isinstance(expected_shape[1], int) else 1
 
     if expected_channels == 2:
@@ -65,7 +66,7 @@ if uploaded_file is not None:
     else:
         combined_tensor = np.expand_dims(shot_norm, axis=0)
 
-    # Batch dimension: (1, C, 1578, 751)
+    # Batch dimension əlavə edilir: (1, C, 1578, 751)
     input_tensor = np.expand_dims(combined_tensor, axis=0).astype(np.float32)
 
     st.write(f"Göndərilən Tensor Shape: `{input_tensor.shape}`, Data Type: `{input_tensor.dtype}`")
@@ -82,9 +83,17 @@ if uploaded_file is not None:
     if st.button("İnferensiyanı Başlat"):
         try:
             outputs = session.run([output_name], {input_name: input_tensor})
-            pred = outputs[0][0]
+            pred = outputs[0]  # Orijinal çıxış massivi
+            
+            # 5. Çıxış formasının təhlükəsiz sıxlaşdırılması (squeeze xətasının qarşısını alır)
+            if pred.ndim == 4 and pred.shape[0] == 1:
+                pred = pred[0]  # Shape: (C, H, W)
+                
             if pred.ndim == 3:
-                pred = pred.squeeze(0)
+                if pred.shape[0] > 1:
+                    pred = np.argmax(pred, axis=0)  # Multi-class maska üçün argmax (H, W)
+                else:
+                    pred = pred[0]  # Tək kanal (1, H, W) -> (H, W)
 
             with col2:
                 fig_pred, ax_pred = plt.subplots(figsize=(6, 6))
