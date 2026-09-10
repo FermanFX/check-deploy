@@ -16,7 +16,7 @@ st.write("Seysmik şəkil faylını yükləyin və modelin ilk gəliş dalğalar
 # ONNX modelini yaddaşa yükləyirik (cache vasitəsilə sürətləndiririk)
 @st.cache_resource
 def load_model():
-    session = ort.InferenceSession("model.onnx")
+    session = ort.InferenceSession("unet_model.onnx")
     input_name = session.get_inputs()[0].name
     output_name = session.get_outputs()[0].name
     return session, input_name, output_name
